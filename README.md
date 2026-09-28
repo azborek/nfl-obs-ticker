@@ -30,7 +30,7 @@ Add these to the end of the URL, for example `nfl-ticker.html?team=KC&speed=90`.
 | `team` | Highlight team(s), e.g. `KC,DAL` | none |
 | `only=1` | Show only the highlighted teams' games | off |
 | `logos=0` | Hide team logos | on |
-| `bg` | Bar opacity, `0` to `1` | `0.94` |
+| `bg` | Bar opacity, `0` to `1` | `1` |
 
 If you change `height`, match the browser source height in OBS.
 
