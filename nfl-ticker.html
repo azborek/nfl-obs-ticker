@@ -22,6 +22,7 @@
     height: var(--h); display: flex;
     background: var(--bar);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    visibility: hidden;
   }
   .badge {
     flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
@@ -32,13 +33,15 @@
   }
   .badge img { height: calc(var(--h) * 0.66); display: block; }
   .badge .wk { font-weight: 600; font-size: calc(var(--h) * 0.36); line-height: 1; white-space: nowrap; letter-spacing: 0.01em; }
+  .badge.stale .wk { color: var(--redzone); }
   .viewport { flex: 1 1 auto; overflow: hidden; position: relative; }
   .track { position: absolute; top: 0; left: 0; height: 100%; display: flex; align-items: center; white-space: nowrap; will-change: transform; }
   .game { display: flex; align-items: center; gap: 10px; height: 100%; padding: 0 16px; position: relative; }
   .game::after { content: ""; position: absolute; right: 0; top: 25%; bottom: 25%; width: 1px; background: var(--divider); }
   .team { display: flex; align-items: center; gap: 6px; height: 100%; }
   .team .stripe { width: 3px; height: 50%; border-radius: 2px; }
-  .team img { height: calc(var(--h) * 0.55); width: auto; }
+  /* Fixed width so the loop is measured correctly before logos finish loading */
+  .team img { height: calc(var(--h) * 0.55); width: calc(var(--h) * 0.55); object-fit: contain; }
   .abbr { font-weight: 600; font-size: calc(var(--h) * 0.42); letter-spacing: 0.02em; }
   .score { font-weight: 700; font-size: calc(var(--h) * 0.48); min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
   .team.loser .abbr, .team.loser .score { color: var(--ink-dim); }
@@ -49,6 +52,7 @@
   .status { display: flex; flex-direction: column; justify-content: center; margin-left: 4px; line-height: 1.1; }
   .status .main { font-weight: 600; font-size: calc(var(--h) * 0.32); }
   .status .sub { font-weight: 500; font-size: calc(var(--h) * 0.27); color: var(--ink-dim); }
+  .status .sub:empty { display: none; }
   .game.live .status .main { color: var(--live); }
   .game.live .status .main::before {
     content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
@@ -57,19 +61,18 @@
   }
   .game.redzone .status .sub { color: var(--redzone); }
   .game.featured { background: rgba(255, 255, 255, 0.06); }
-  .msg { padding: 0 16px; font-weight: 500; font-size: calc(var(--h) * 0.36); color: var(--ink-dim); }
   @keyframes pulse { 50% { opacity: 0.25; } }
   @media (prefers-reduced-motion: reduce) { .game.live .status .main::before { animation: none; } }
 </style>
 </head>
 <body>
-<div class="ticker">
-  <div class="badge">
+<div class="ticker" id="ticker">
+  <div class="badge" id="badge">
     <img src="https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png" alt="NFL" onerror="this.remove()">
     <span class="wk" id="wk"></span>
   </div>
   <div class="viewport" id="viewport">
-    <div class="track" id="track"><span class="msg">Loading scores</span></div>
+    <div class="track" id="track"></div>
   </div>
 </div>
 
@@ -82,6 +85,8 @@
    only    : set to 1 to show only the highlighted teams' games
    logos   : set to 0 to hide team logos
    bg      : bar opacity 0 to 1 (default 0.94)
+   Testing : seasontype, week, year load a specific week; simulate=fail fails every request
+             after the first load, simulate=primary fails only the primary ESPN host
 */
 const q = new URLSearchParams(location.search);
 const SPEED   = Number(q.get("speed"))   || 70;
@@ -90,22 +95,39 @@ const HEIGHT  = Number(q.get("height"))  || 40;
 const TEAMS   = (q.get("team") || "").toUpperCase().split(",").filter(Boolean);
 const ONLY    = q.get("only") === "1";
 const LOGOS   = q.get("logos") !== "0";
-const BG      = q.has("bg") ? Math.min(1, Math.max(0, Number(q.get("bg")))) : 0.94;
+const BG      = q.has("bg") && Number.isFinite(Number(q.get("bg"))) ? Math.min(1, Math.max(0, Number(q.get("bg")))) : 0.94;
+const SIMULATE = q.get("simulate");
+const WEEK_PARAMS = new URLSearchParams(
+  [["seasontype", q.get("seasontype")], ["week", q.get("week")], ["dates", q.get("year")]].filter(([, v]) => v)
+).toString();
 
-const API = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard";
+// Second host serves the same feed; ESPN's CDN intermittently returns 403 on one or the other
+const HOSTS = ["https://site.api.espn.com", "https://site.web.api.espn.com"];
+const PATH = "/apis/site/v2/sports/football/nfl/scoreboard";
+const RETRY_DELAYS = [5000, 10000];
+const STALE_AFTER = 2 * 60 * 1000;
 
 document.documentElement.style.setProperty("--h", HEIGHT + "px");
 document.documentElement.style.setProperty("--bar", `rgba(10,16,30,${BG})`);
 
+const ticker = document.getElementById("ticker");
+const badge = document.getElementById("badge");
 const track = document.getElementById("track");
 const viewport = document.getElementById("viewport");
 const wkEl = document.getElementById("wk");
 
-let pendingHTML = null;
-let currentHTML = "";
+let latest = [];
+let label = "";
 let anim = null;
+let failures = 0;
+let lastSuccess = 0;
+
+// Measure the loop with the real font, not the fallback
+const fontsReady = Promise.all([500, 600, 700].map(w => document.fonts.load(`${w} 16px "Barlow Condensed"`))).catch(() => {});
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+const stateOf = ev => ev.status?.type?.state;
+const byDate = dir => (a, b) => dir * (new Date(a.date) - new Date(b.date));
 
 function seasonLabel(data) {
   const type = data.season?.type;
@@ -117,30 +139,29 @@ function seasonLabel(data) {
   return wk ? `Week ${wk}` : "";
 }
 
-function teamHTML(c, possId, winnerKnown) {
+function teamModel(c, possId, winnerKnown, pre) {
   const t = c.team || {};
   const loser = winnerKnown && c.winner === false ? " loser" : "";
   const ball = possId && String(possId) === String(t.id) ? " has-ball" : "";
-  const color = t.color ? `#${t.color}` : "#666";
-  const logo = LOGOS && t.logo ? `<img src="${esc(t.logo)}" alt="">` : "";
-  const score = c.score ?? "";
-  return `<div class="team${loser}${ball}">
-      <span class="stripe" style="background:${esc(color)}"></span>
-      ${logo}<span class="abbr">${esc(t.abbreviation)}</span>
-      <span class="score">${esc(score)}</span><span class="poss"></span>
-    </div>`;
+  return {
+    cls: `team${loser}${ball}`,
+    score: pre ? "" : String(c.score ?? ""),
+    color: t.color ? `#${t.color}` : "#666",
+    logo: LOGOS && t.logo ? t.logo : "",
+    abbr: t.abbreviation,
+  };
 }
 
-function gameHTML(ev) {
+function gameModel(ev) {
   const comp = ev.competitions?.[0];
-  if (!comp) return "";
-  const away = comp.competitors.find(c => c.homeAway === "away");
-  const home = comp.competitors.find(c => c.homeAway === "home");
-  if (!away || !home) return "";
+  if (!comp) return null;
+  const away = comp.competitors?.find(c => c.homeAway === "away");
+  const home = comp.competitors?.find(c => c.homeAway === "home");
+  if (!away || !home) return null;
 
   const abbrs = [away.team?.abbreviation, home.team?.abbreviation].map(a => (a || "").toUpperCase());
   const featured = TEAMS.length && abbrs.some(a => TEAMS.includes(a));
-  if (ONLY && TEAMS.length && !featured) return "";
+  if (ONLY && TEAMS.length && !featured) return null;
 
   const st = ev.status?.type || {};
   const state = st.state; // pre | in | post
@@ -162,68 +183,85 @@ function gameHTML(ev) {
   }
   if (featured) cls += " featured";
 
+  const poss = state === "in" ? sit.possession : null;
   const winnerKnown = state === "post";
   const pre = state === "pre";
-  const strip = c => pre ? { ...c, score: "" } : c;
+  return {
+    id: String(ev.id),
+    cls,
+    teams: [teamModel(away, poss, winnerKnown, pre), teamModel(home, poss, winnerKnown, pre)],
+    main,
+    sub,
+  };
+}
 
-  return `<div class="${cls}">
-      ${teamHTML(strip(away), state === "in" ? sit.possession : null, winnerKnown)}
-      ${teamHTML(strip(home), state === "in" ? sit.possession : null, winnerKnown)}
-      <div class="status"><span class="main">${esc(main)}</span>${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>
+const teamHTML = t => `<div class="${t.cls}">
+      <span class="stripe" style="background:${esc(t.color)}"></span>
+      ${t.logo ? `<img src="${esc(t.logo)}" alt="">` : ""}<span class="abbr">${esc(t.abbr)}</span>
+      <span class="score">${esc(t.score)}</span><span class="poss"></span>
     </div>`;
-}
 
-function buildHTML(events, emptyMsg) {
-  const games = events.map(gameHTML).join("");
-  return games || `<span class="msg">${esc(emptyMsg)}</span>`;
-}
+const gameHTML = g => `<div class="${g.cls}" data-id="${esc(g.id)}">
+      ${g.teams.map(teamHTML).join("")}
+      <div class="status"><span class="main">${esc(g.main)}</span><span class="sub">${esc(g.sub)}</span></div>
+    </div>`;
 
-const stateOf = ev => ev.status?.type?.state;
-
-async function getJSON(url) {
-  const sep = url.includes("?") ? "&" : "?";
-  const res = await fetch(`${url}${sep}_=${Date.now()}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(res.status);
-  return res.json();
-}
-
-// Scoreboard for the week before the one ESPN is currently returning
-async function getPreviousWeek(data) {
-  const year = data.season?.year;
-  let type = data.season?.type;
-  let week = (data.week?.number || 1) - 1;
-  if (week < 1) {
-    if (type === 3) { type = 2; week = 18; }      // playoffs -> last regular season week
-    else if (type === 2) { type = 1; week = 3; }  // week 1 -> last preseason week
-    else return null;
+async function getJSON(params) {
+  let err;
+  for (const [i, host] of HOSTS.entries()) {
+    try {
+      if ((SIMULATE === "fail" && lastSuccess) || (SIMULATE === "primary" && i === 0)) throw new Error("simulated failure");
+      const query = [params, `_=${Date.now()}`].filter(Boolean).join("&");
+      const res = await fetch(`${host}${PATH}?${query}`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(res.status);
+      return await res.json();
+    } catch (e) {
+      console.warn(`${host} failed:`, e);
+      err = e;
+    }
   }
-  return getJSON(`${API}?seasontype=${type}&week=${week}&dates=${year}`);
+  throw err;
 }
 
-// Live games if any are on; otherwise the most recent completed games
+// The week to fall back on before the current one kicks off. The Pro Bowl is skipped, and
+// preseason results are never carried into Week 1.
+function previousWeek(type, week) {
+  if (type === 3 && week >= 4) return { type: 3, week: 3 };
+  if (type === 3 && week === 1) return { type: 2, week: 18 };
+  if (week > 1) return { type, week: week - 1 };
+  return null;
+}
+
 async function pickGames(data) {
   const events = data.events || [];
-  const live = events.filter(ev => stateOf(ev) === "in");
-  if (live.length) return { events: live, source: data, label: "Live" };
+  const type = data.season?.type;
+  const week = data.week?.number || 1;
+  const proBowl = type === 3 && week === 4;
+  const started = events.some(ev => stateOf(ev) === "in" || ev.status?.type?.completed);
 
-  const finals = events.filter(ev => stateOf(ev) === "post");
-  if (finals.length) return { events: newestFirst(finals), source: data, label: "Final" };
+  if (!started || proBowl) {
+    const prev = previousWeek(type, week);
+    if (prev) {
+      const prevData = await getJSON(`seasontype=${prev.type}&week=${prev.week}&dates=${data.season?.year}`);
+      const finals = (prevData.events || []).filter(ev => stateOf(ev) === "post");
+      if (finals.length || proBowl) return { events: finals.sort(byDate(-1)), source: prevData };
+    }
+  }
 
-  const prev = await getPreviousWeek(data);
-  const prevFinals = (prev?.events || []).filter(ev => stateOf(ev) === "post");
-  return { events: newestFirst(prevFinals), source: prev || data, label: "Final" };
+  const live = events.filter(ev => stateOf(ev) === "in").sort(byDate(1));
+  const finals = events.filter(ev => stateOf(ev) === "post").sort(byDate(-1));
+  const upcoming = events.filter(ev => stateOf(ev) === "pre").sort(byDate(1));
+  return { events: [...live, ...finals, ...upcoming], source: data };
 }
 
-const newestFirst = list => [...list].sort((a, b) => new Date(b.date) - new Date(a.date));
-
-function render(html) {
+function render() {
   if (anim) anim.cancel();
-  currentHTML = html;
+  if (!latest.length) return;
+  const html = latest.map(gameHTML).join("");
 
   // Build one "set", repeat it until it covers the viewport, then double it for a seamless loop
-  track.innerHTML = `<div class="set" style="display:flex;height:100%">${html}</div>`;
-  const set = track.firstElementChild;
-  const setW = set.scrollWidth || 1;
+  track.innerHTML = `<div style="display:flex;height:100%">${html}</div>`;
+  const setW = track.firstElementChild.scrollWidth || 1;
   const reps = Math.max(1, Math.ceil(viewport.clientWidth / setW));
   const block = html.repeat(reps);
   track.innerHTML =
@@ -231,37 +269,77 @@ function render(html) {
     `<div style="display:flex;height:100%" aria-hidden="true">${block}</div>`;
 
   const loopW = track.firstElementChild.scrollWidth;
-  const duration = (loopW / SPEED) * 1000;
-
   anim = track.animate(
     [{ transform: "translateX(0)" }, { transform: `translateX(-${loopW}px)` }],
-    { duration, iterations: 1, easing: "linear" }
+    { duration: (loopW / SPEED) * 1000, iterations: 1, easing: "linear" }
   );
-  // Swap in fresh scores only at the loop seam, so the ticker never jumps mid-scroll
-  anim.onfinish = () => {
-    const next = pendingHTML ?? currentHTML;
-    pendingHTML = null;
-    render(next);
-  };
+  // Rebuild at the loop seam so added, removed, or reordered games never make the ticker jump
+  anim.onfinish = render;
+}
+
+// Update scores in place mid-scroll; game order only changes at the next seam
+function patch() {
+  for (const g of latest) {
+    for (const el of track.querySelectorAll(`.game[data-id="${CSS.escape(g.id)}"]`)) {
+      if (el.className !== g.cls) el.className = g.cls;
+      el.querySelectorAll(".team").forEach((teamEl, i) => {
+        const t = g.teams[i];
+        if (teamEl.className !== t.cls) teamEl.className = t.cls;
+        const score = teamEl.querySelector(".score");
+        if (score.textContent !== t.score) score.textContent = t.score;
+      });
+      for (const [sel, text] of [[".main", g.main], [".sub", g.sub]]) {
+        const node = el.querySelector(sel);
+        if (node.textContent !== text) node.textContent = text;
+      }
+    }
+  }
+}
+
+async function show(games) {
+  const wasEmpty = !latest.length;
+  latest = games;
+  if (!games.length) {
+    if (anim) anim.cancel();
+    anim = null;
+    track.innerHTML = "";
+    ticker.style.visibility = "hidden";
+    return;
+  }
+  if (wasEmpty) {
+    await fontsReady;
+    ticker.style.visibility = "visible";
+    render();
+  } else {
+    patch();
+  }
+}
+
+function updateBadge() {
+  const stale = latest.length > 0 && Date.now() - lastSuccess > STALE_AFTER;
+  badge.classList.toggle("stale", stale);
+  wkEl.textContent = stale ? "Delayed" : label;
 }
 
 async function update() {
   try {
-    const data = await getJSON(API);
+    const data = await getJSON(WEEK_PARAMS);
     const pick = await pickGames(data);
-    const wk = seasonLabel(pick.source);
-    wkEl.textContent = pick.label === "Live" ? (wk ? `${wk} Live` : "Live") : wk;
-    const html = buildHTML(pick.events, "No recent games");
-    if (!currentHTML || currentHTML.includes('class="msg"')) render(html);
-    else if (html !== currentHTML) pendingHTML = html;
+    const anyLive = pick.events.some(ev => stateOf(ev) === "in");
+    label = [seasonLabel(pick.source), anyLive && "Live"].filter(Boolean).join(" ");
+    lastSuccess = Date.now();
+    failures = 0;
+    await show(pick.events.map(gameModel).filter(Boolean));
   } catch (e) {
     console.error("Score update failed:", e);
-    if (!currentHTML) track.innerHTML = `<span class="msg">Scores unavailable. Retrying in ${REFRESH / 1000}s</span>`;
+    failures++;
   }
+  updateBadge();
+  const delay = failures ? Math.min(RETRY_DELAYS[failures - 1] ?? REFRESH, REFRESH) : REFRESH;
+  setTimeout(update, delay);
 }
 
 update();
-setInterval(update, REFRESH);
 </script>
 </body>
 </html>

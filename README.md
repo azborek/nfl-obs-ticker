@@ -2,10 +2,12 @@
 
 A slim, scrolling NFL score ticker built for OBS browser sources. It pulls scores from ESPN's public scoreboard feed and updates on its own.
 
-- Shows live games while they're on, with the clock, down and distance, possession, and a red zone highlight
-- Falls back to the latest final scores when nothing is live, including the previous week early in the week
+- Shows the whole week: live games first (clock, down and distance, possession, red zone highlight), then finals, then upcoming kickoffs
+- Keeps last week's finals up until the new week's first kickoff (skips the Pro Bowl; preseason results never carry into Week 1)
 - Team color stripes and logos, transparent background
-- Scores refresh without interrupting the scroll
+- Scores update in place without interrupting the scroll
+- Retries quickly and switches to a mirror host if ESPN rejects a request; the badge turns amber and reads **Delayed** if scores haven't updated for 2 minutes
+- The bar hides itself when there's nothing to show
 
 ## Setup in OBS
 
@@ -34,8 +36,20 @@ If you change `height`, match the browser source height in OBS.
 
 ## Troubleshooting
 
-- **"Scores unavailable":** right-click the source, choose **Interact**, and check for errors, or click **Refresh cache of current page** in the source properties. Opening the file from a local server (`python -m http.server 8000`) also helps if your browser blocks requests from local files.
+- **Bar never appears, or stays on "Delayed":** ESPN is rejecting requests from your network. Right-click the source, choose **Interact**, and check for errors, or click **Refresh cache of current page** in the source properties. Opening the file from a local server (`python -m http.server 8000`) also helps if your browser blocks requests from local files.
 - **No logos:** your network may be blocking ESPN's image server.
+
+## Testing
+
+These options are for checking behavior outside game time. They do nothing unless they're in the URL.
+
+| Param | What it does |
+|---|---|
+| `seasontype`, `week`, `year` | Load a specific week, e.g. `?seasontype=3&week=4&year=2025` (the ticker treats it as the current week) |
+| `simulate=fail` | Fail every request after the first load, to see the retries and the **Delayed** badge |
+| `simulate=primary` | Fail only the primary ESPN host, to see the mirror take over |
+
+`seasontype` is `1` preseason, `2` regular season, `3` postseason. `year` is the season's starting year.
 
 ## Notes
 
