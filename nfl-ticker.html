@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NFL Score Ticker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --h: 40px;
+    --bar: rgba(10, 16, 30, 0.94);
+    --divider: rgba(255, 255, 255, 0.09);
+    --ink: #f5f7fa;
+    --ink-dim: #8a94a8;
+    --live: #ff4040;
+    --redzone: #ffb020;
+    --font: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  }
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; font-family: var(--font); color: var(--ink); }
+  .ticker {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    height: var(--h); display: flex;
+    background: var(--bar);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .badge {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 0 14px 0 12px;
+    background: #013369;
+    box-shadow: inset 0 -2px 0 #d50a0a;
+    z-index: 2;
+  }
+  .badge img { height: calc(var(--h) * 0.66); display: block; }
+  .badge .wk { font-weight: 600; font-size: calc(var(--h) * 0.36); line-height: 1; white-space: nowrap; letter-spacing: 0.01em; }
+  .viewport { flex: 1 1 auto; overflow: hidden; position: relative; }
+  .track { position: absolute; top: 0; left: 0; height: 100%; display: flex; align-items: center; white-space: nowrap; will-change: transform; }
+  .game { display: flex; align-items: center; gap: 10px; height: 100%; padding: 0 16px; position: relative; }
+  .game::after { content: ""; position: absolute; right: 0; top: 25%; bottom: 25%; width: 1px; background: var(--divider); }
+  .team { display: flex; align-items: center; gap: 6px; height: 100%; }
+  .team .stripe { width: 3px; height: 50%; border-radius: 2px; }
+  .team img { height: calc(var(--h) * 0.55); width: auto; }
+  .abbr { font-weight: 600; font-size: calc(var(--h) * 0.42); letter-spacing: 0.02em; }
+  .score { font-weight: 700; font-size: calc(var(--h) * 0.48); min-width: 1.2em; text-align: right; font-variant-numeric: tabular-nums; }
+  .team.loser .abbr, .team.loser .score { color: var(--ink-dim); }
+  .team.loser img { opacity: 0.5; }
+  .poss { width: 0; height: 0; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-right: 6px solid var(--ink); visibility: hidden; }
+  .team.has-ball .poss { visibility: visible; }
+  .game.redzone .team.has-ball .poss { border-right-color: var(--redzone); }
+  .status { display: flex; flex-direction: column; justify-content: center; margin-left: 4px; line-height: 1.1; }
+  .status .main { font-weight: 600; font-size: calc(var(--h) * 0.32); }
+  .status .sub { font-weight: 500; font-size: calc(var(--h) * 0.27); color: var(--ink-dim); }
+  .game.live .status .main { color: var(--live); }
+  .game.live .status .main::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--live); margin-right: 5px; vertical-align: middle;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .game.redzone .status .sub { color: var(--redzone); }
+  .game.featured { background: rgba(255, 255, 255, 0.06); }
+  .msg { padding: 0 16px; font-weight: 500; font-size: calc(var(--h) * 0.36); color: var(--ink-dim); }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  @media (prefers-reduced-motion: reduce) { .game.live .status .main::before { animation: none; } }
+</style>
+</head>
+<body>
+<div class="ticker">
+  <div class="badge">
+    <img src="https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png" alt="NFL" onerror="this.remove()">
+    <span class="wk" id="wk"></span>
+  </div>
+  <div class="viewport" id="viewport">
+    <div class="track" id="track"><span class="msg">Loading scores</span></div>
+  </div>
+</div>
+
+<script>
+/* Options via URL query string, e.g. nfl-ticker.html?speed=80&refresh=15&team=KC
+   speed   : scroll speed in pixels per second (default 70)
+   refresh : seconds between score updates (default 20)
+   height  : ticker height in px (default 40)
+   team    : team abbreviation(s) to highlight, comma separated (e.g. KC,DAL)
+   only    : set to 1 to show only the highlighted teams' games
+   logos   : set to 0 to hide team logos
+   bg      : bar opacity 0 to 1 (default 0.94)
+*/
+const q = new URLSearchParams(location.search);
+const SPEED   = Number(q.get("speed"))   || 70;
+const REFRESH = (Number(q.get("refresh")) || 20) * 1000;
+const HEIGHT  = Number(q.get("height"))  || 40;
+const TEAMS   = (q.get("team") || "").toUpperCase().split(",").filter(Boolean);
+const ONLY    = q.get("only") === "1";
+const LOGOS   = q.get("logos") !== "0";
+const BG      = q.has("bg") ? Math.min(1, Math.max(0, Number(q.get("bg")))) : 0.94;
+
+const API = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard";
+
+document.documentElement.style.setProperty("--h", HEIGHT + "px");
+document.documentElement.style.setProperty("--bar", `rgba(10,16,30,${BG})`);
+
+const track = document.getElementById("track");
+const viewport = document.getElementById("viewport");
+const wkEl = document.getElementById("wk");
+
+let pendingHTML = null;
+let currentHTML = "";
+let anim = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+function seasonLabel(data) {
+  const type = data.season?.type;
+  const wk = data.week?.number;
+  if (type === 1) return "Preseason";
+  if (type === 3) {
+    return ({ 1: "Wild Card", 2: "Divisional", 3: "Conf. Champ", 4: "Pro Bowl", 5: "Super Bowl" })[wk] || "Playoffs";
+  }
+  return wk ? `Week ${wk}` : "";
+}
+
+function teamHTML(c, possId, winnerKnown) {
+  const t = c.team || {};
+  const loser = winnerKnown && c.winner === false ? " loser" : "";
+  const ball = possId && String(possId) === String(t.id) ? " has-ball" : "";
+  const color = t.color ? `#${t.color}` : "#666";
+  const logo = LOGOS && t.logo ? `<img src="${esc(t.logo)}" alt="">` : "";
+  const score = c.score ?? "";
+  return `<div class="team${loser}${ball}">
+      <span class="stripe" style="background:${esc(color)}"></span>
+      ${logo}<span class="abbr">${esc(t.abbreviation)}</span>
+      <span class="score">${esc(score)}</span><span class="poss"></span>
+    </div>`;
+}
+
+function gameHTML(ev) {
+  const comp = ev.competitions?.[0];
+  if (!comp) return "";
+  const away = comp.competitors.find(c => c.homeAway === "away");
+  const home = comp.competitors.find(c => c.homeAway === "home");
+  if (!away || !home) return "";
+
+  const abbrs = [away.team?.abbreviation, home.team?.abbreviation].map(a => (a || "").toUpperCase());
+  const featured = TEAMS.length && abbrs.some(a => TEAMS.includes(a));
+  if (ONLY && TEAMS.length && !featured) return "";
+
+  const st = ev.status?.type || {};
+  const state = st.state; // pre | in | post
+  const sit = comp.situation || {};
+  let main = "", sub = "", cls = "game";
+
+  if (state === "pre") {
+    const d = new Date(ev.date);
+    main = d.toLocaleDateString([], { weekday: "short" }) + " " +
+           d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    sub = comp.broadcasts?.[0]?.names?.[0] || comp.broadcast || "";
+  } else if (state === "in") {
+    cls += " live";
+    main = st.shortDetail || "Live";
+    sub = sit.downDistanceText || "";
+    if (sit.isRedZone) cls += " redzone";
+  } else {
+    main = st.shortDetail || "Final";
+  }
+  if (featured) cls += " featured";
+
+  const winnerKnown = state === "post";
+  const pre = state === "pre";
+  const strip = c => pre ? { ...c, score: "" } : c;
+
+  return `<div class="${cls}">
+      ${teamHTML(strip(away), state === "in" ? sit.possession : null, winnerKnown)}
+      ${teamHTML(strip(home), state === "in" ? sit.possession : null, winnerKnown)}
+      <div class="status"><span class="main">${esc(main)}</span>${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</div>
+    </div>`;
+}
+
+function buildHTML(events, emptyMsg) {
+  const games = events.map(gameHTML).join("");
+  return games || `<span class="msg">${esc(emptyMsg)}</span>`;
+}
+
+const stateOf = ev => ev.status?.type?.state;
+
+async function getJSON(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  const res = await fetch(`${url}${sep}_=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
+
+// Scoreboard for the week before the one ESPN is currently returning
+async function getPreviousWeek(data) {
+  const year = data.season?.year;
+  let type = data.season?.type;
+  let week = (data.week?.number || 1) - 1;
+  if (week < 1) {
+    if (type === 3) { type = 2; week = 18; }      // playoffs -> last regular season week
+    else if (type === 2) { type = 1; week = 3; }  // week 1 -> last preseason week
+    else return null;
+  }
+  return getJSON(`${API}?seasontype=${type}&week=${week}&dates=${year}`);
+}
+
+// Live games if any are on; otherwise the most recent completed games
+async function pickGames(data) {
+  const events = data.events || [];
+  const live = events.filter(ev => stateOf(ev) === "in");
+  if (live.length) return { events: live, source: data, label: "Live" };
+
+  const finals = events.filter(ev => stateOf(ev) === "post");
+  if (finals.length) return { events: newestFirst(finals), source: data, label: "Final" };
+
+  const prev = await getPreviousWeek(data);
+  const prevFinals = (prev?.events || []).filter(ev => stateOf(ev) === "post");
+  return { events: newestFirst(prevFinals), source: prev || data, label: "Final" };
+}
+
+const newestFirst = list => [...list].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+function render(html) {
+  if (anim) anim.cancel();
+  currentHTML = html;
+
+  // Build one "set", repeat it until it covers the viewport, then double it for a seamless loop
+  track.innerHTML = `<div class="set" style="display:flex;height:100%">${html}</div>`;
+  const set = track.firstElementChild;
+  const setW = set.scrollWidth || 1;
+  const reps = Math.max(1, Math.ceil(viewport.clientWidth / setW));
+  const block = html.repeat(reps);
+  track.innerHTML =
+    `<div style="display:flex;height:100%">${block}</div>` +
+    `<div style="display:flex;height:100%" aria-hidden="true">${block}</div>`;
+
+  const loopW = track.firstElementChild.scrollWidth;
+  const duration = (loopW / SPEED) * 1000;
+
+  anim = track.animate(
+    [{ transform: "translateX(0)" }, { transform: `translateX(-${loopW}px)` }],
+    { duration, iterations: 1, easing: "linear" }
+  );
+  // Swap in fresh scores only at the loop seam, so the ticker never jumps mid-scroll
+  anim.onfinish = () => {
+    const next = pendingHTML ?? currentHTML;
+    pendingHTML = null;
+    render(next);
+  };
+}
+
+async function update() {
+  try {
+    const data = await getJSON(API);
+    const pick = await pickGames(data);
+    const wk = seasonLabel(pick.source);
+    wkEl.textContent = pick.label === "Live" ? (wk ? `${wk} Live` : "Live") : wk;
+    const html = buildHTML(pick.events, "No recent games");
+    if (!currentHTML || currentHTML.includes('class="msg"')) render(html);
+    else if (html !== currentHTML) pendingHTML = html;
+  } catch (e) {
+    console.error("Score update failed:", e);
+    if (!currentHTML) track.innerHTML = `<span class="msg">Scores unavailable. Retrying in ${REFRESH / 1000}s</span>`;
+  }
+}
+
+update();
+setInterval(update, REFRESH);
+</script>
+</body>
+</html>
