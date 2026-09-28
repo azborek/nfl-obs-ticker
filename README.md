@@ -11,7 +11,7 @@ A slim, scrolling NFL score ticker built for OBS browser sources. It pulls score
 
 1. Add a **Browser** source.
 2. Point it at the ticker:
-   - **Hosted:** `https://<your-username>.github.io/<repo-name>/` (options work here too, e.g. `/?team=KC`)
+   - **Hosted:** `https://azborek.github.io/nfl-obs-ticker/` (options work here too, e.g. `/?team=KC`)
    - **Local:** `file:///C:/path/to/nfl-ticker.html` (uncheck Local file so URL options work)
 3. Set width to your canvas width (e.g. `1920`) and height to `40`.
 4. Leave **Shutdown source when not visible** unchecked.
